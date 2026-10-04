@@ -1,10 +1,15 @@
 """Build local recognition templates from a user-owned initial-position screenshot."""
 import argparse
+import sys
 from pathlib import Path
 from PIL import Image
 from vision import START, Geometry, Recognizer, locate_board
 
 def main():
+    # Windows non-Chinese redirected consoles may otherwise use cp1252.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="使用完整开局棋盘截图生成本机识别模板")
     parser.add_argument("image", type=Path, help="本机 PNG/JPG/BMP 截图路径")
     parser.add_argument("--red-top", action="store_true", help="截图中红方在上")

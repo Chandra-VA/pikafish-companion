@@ -2,6 +2,7 @@
 from copy import deepcopy
 from pathlib import Path
 import tempfile
+import io
 import unittest
 from unittest.mock import patch
 from PIL import Image, ImageDraw, ImageFont
@@ -25,8 +26,11 @@ class PortableTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             source,output = Path(folder)/"own-board.png",Path(folder)/"templates.npz"
             image.save(source)
-            with patch("sys.argv", ["calibrate",str(source),"--corners","80","90","640","720","--output",str(output)]):
+            console = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+            with patch("sys.argv", ["calibrate",str(source),"--corners","80","90","640","720","--output",str(output)]), patch("sys.stdout", console):
                 calibrate()
+                console.flush()
+                self.assertIn("已生成本机模板", console.buffer.getvalue().decode("utf-8"))
             board,uncertain,_ = Recognizer.load(output).recognize(image,geometry)
             self.assertEqual(board, START)
             self.assertEqual(uncertain, [])
