@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="pika-token" content="__TOKEN__"><title>皮卡鱼 · 自动棋盘分析</title><link rel="stylesheet" href="/styles.css"><script defer src="/main.js"></script></head>
+<body>
+<header class="toolbar">
+  <span class="brand"><span class="brand-icon">象</span><strong>皮卡鱼</strong></span>
+  <button id="automatic" class="primary">◉ 实时同步</button><button id="simulate">♟ 模拟走棋</button><button id="undo" disabled>↶ 悔棋</button><button id="simulation-reset" disabled>回到起点</button><button id="analyze">⌕ 分析局面</button>
+  <button id="flip">◧ 翻转</button><button id="orientation">方向：自动</button>
+  <button id="import">＋ 导入截图</button><button id="export">⇩ 保存棋谱</button><button id="edit">✎ 校正</button><button id="reset">↺ 新局面</button>
+  <input type="file" id="image-input" accept="image/png,image/jpeg,image/bmp" hidden>
+</header>
+<section class="connection"><span id="status-dot" class="dot"></span><span id="status">正在连接本机皮卡鱼…</span><select id="window" aria-label="待识别的网页窗口"><option value="">等待天天象棋窗口</option></select><button id="preview">查看识别原图</button></section>
+<main class="workspace">
+  <section class="board-column">
+    <div class="board-wrap"><svg id="board" viewBox="0 0 620 688" role="img" aria-label="当前象棋局面"></svg><div id="board-empty">等待网页棋盘<br><small>打开天天象棋，并保持棋盘完整可见</small></div><div id="replay-badge" hidden>后续变化预览</div></div>
+    <div class="navigation card"><button id="first" title="当前局面">|‹</button><button id="previous" title="上一步">‹</button><span id="replay-label">当前局面</span><button id="next" title="下一步">›</button><button id="last" title="变化末尾">›|</button></div>
+    <div id="edit-panel" class="card" hidden><span>校正棋子</span><select id="piece"><option value=".">空位</option><option value="K">红帅</option><option value="A">红仕</option><option value="B">红相</option><option value="N">红马</option><option value="R">红车</option><option value="C">红炮</option><option value="P">红兵</option><option value="k">黑将</option><option value="a">黑士</option><option value="b">黑象</option><option value="n">黑马</option><option value="r">黑车</option><option value="c">黑炮</option><option value="p">黑卒</option></select><small>选择后点击棋盘位置</small></div>
+    <section class="card graph-card"><div class="card-caption"><span>局面走势 <small id="graph-perspective">红方视角</small></span><span id="score-label">等待评估</span></div><svg id="graph" viewBox="0 0 620 110" aria-label="局面评分曲线"></svg></section>
+  </section>
+  <section class="history-column card"><div class="card-heading">走棋记录 <span id="history-count">0</span></div><div id="history" class="scroll"></div><div class="history-note">从开始识别时记录<br>点击着法可回看局面</div></section>
+  <section class="analysis-column">
+    <section class="card candidates"><div class="card-heading"><span>候选着法</span><span id="candidate-count" class="quiet">皮卡鱼 MultiPV</span></div><div class="side-controls"><span>行棋方</span><select id="side"><option value="auto">自动判断</option><option value="w">红方</option><option value="b">黑方</option></select><span id="turn-badge" class="badge">等待识别</span></div><p id="turn-note" class="helper">首次读取会分别分析红黑，检测到落子后自动跟随。</p><div id="candidates"></div></section>
+    <section class="card variation-card"><div class="card-heading"><span>后续变化</span><span id="variation-length" class="quiet">双方最佳应对</span></div><div id="variation-heading">选取候选着法，查看完整变化</div><div id="variation" class="scroll"><div class="empty">皮卡鱼搜索后，后续多步走法会显示在这里。</div></div><div class="variation-footer">点击任意一步可在棋盘回放 · 搜索预测会随局面和深度更新</div></section>
+    <section class="card engine-card"><div class="card-heading">引擎 <span class="engine-name">Pikafish · 本机 NNUE</span></div><div class="engine-settings"><label>思考时间<select id="seconds"><option value="1">1 秒</option><option value="3" selected>3 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="20">20 秒</option><option value="30">30 秒</option></select></label><label>候选数量<select id="multipv"><option value="1">1 条</option><option value="2">2 条</option><option value="3" selected>3 条</option><option value="5">5 条</option></select></label><span id="search-state" class="badge">等待棋盘</span></div><div id="move-review" hidden><div class="review-title"><strong id="review-move">本步评分</strong><span id="review-points"></span></div><div id="review-evaluation"></div><div id="review-detail"></div><small>局面分采用皮卡鱼整数评估，非胜率；评分每次搜索最多 10 秒。</small></div><div id="engine-summary">2 线程 · 128 MB Hash · 自动识别与计算均在本机进行</div></section>
+  </section>
+</main><footer>皮卡鱼自动棋盘分析 · 当前天天象棋棋盘皮肤 · <span id="source-label">网页识别</span></footer>
+<dialog id="preview-dialog"><div class="card-heading">识别原图<button id="close-preview">关闭</button></div><img id="preview-image" alt="网页棋盘原图"><p>橙框代表识别不确定。移开鼠标或选中效果，或在棋盘上校正。</p></dialog>
+<div id="toast" role="status" hidden></div>
+</body></html>

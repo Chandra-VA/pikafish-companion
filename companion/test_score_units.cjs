@@ -1,0 +1,18 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const vm=require('node:vm');
+const source=fs.readFileSync(__dirname+'/web/main.js','utf8');
+const helpers=source.slice(source.indexOf('function displayEvaluation('),source.indexOf('function point('));
+const context={assert,redBottom:()=>true};
+vm.createContext(context);
+vm.runInContext(helpers,context);
+assert.equal(context.displayEvaluation({unit:'cp',score:1750,side:'w'}),'红分 +1750');
+assert.equal(context.displayEvaluation({unit:'cp',score:2300,side:'b',bound:'lowerbound'}),'红分 ≤-2300');
+const legacy={status:'done',points:5,loss:5.5,played_evaluation:'红方视角 -17.50 · 黑方占优'};
+assert.equal(context.ratingCaption(legacy),'红分 -1750 · 损失 550 分');
+assert.equal(context.ratingCaption({status:'done',score_unit:'cp',played_score:-1750,loss:550}),'红分 -1750 · 损失 550 分');
+context.redBottom=()=>false;
+assert.equal(context.ratingCaption(legacy),'黑分 +1750 · 损失 550 分');
+assert.equal(context.displayEvaluation({unit:'cp',score:2300,side:'b',bound:'lowerbound'}),'黑分 ≥+2300');
+assert.equal(context.ratingCaption({status:'done',score_unit:'cp',played_mate:-9,loss:null}),'黑方有将杀，距离 9（引擎报告）');
+console.log('Integer scores, legacy migration, viewpoint, bounds and mate checks passed.');
