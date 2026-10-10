@@ -84,9 +84,48 @@ def capture_game(hwnd=None):
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         raise ctypes.WinError(ctypes.get_last_error())
     left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+    return capture_rect((left, top, right, bottom))
+
+
+def desktop_rect():
+    """Physical coordinates of the virtual desktop, including negative origins."""
+    user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    x, y, width, height = (user32.GetSystemMetrics(i) for i in (76, 77, 78, 79))
+    return x, y, x + width, y + height
+
+
+def validate_rect(rect, bounds=None):
+    if len(rect) != 4 or any(type(value) is not int for value in rect):
+        raise ValueError("屏幕坐标必须是四个整数。")
+    left, top, right, bottom = rect
+    bounds = desktop_rect() if bounds is None else bounds
+    if not (bounds[0] <= left < right <= bounds[2] and bounds[1] <= top < bottom <= bounds[3]):
+        raise ValueError("所选区域已超出桌面；显示器布局变化后请重新框选。")
     width, height = right-left, bottom-top
     if width <= 0 or height <= 0 or width*height > 30_000_000:
-        raise RuntimeError("窗口尺寸异常，请改用导入截图。")
+        raise ValueError("截图区域过大或尺寸异常，请选择单块棋盘。")
+    return left, top, right, bottom
+
+
+def region_from_grid(points, bounds=None):
+    """Expand the outermost grid intersections to retain edge-piece ink."""
+    bounds = desktop_rect() if bounds is None else bounds
+    left, top, right, bottom = validate_rect(points, bounds)
+    dx, dy = (right-left)/8, (bottom-top)/9
+    if min(dx, dy) < 16 or not 0.65 < dx/dy < 1.5:
+        raise ValueError("请框选一块完整棋盘的最左上、最右下交叉点，至少每格 16 像素。")
+    mx, my = round(dx*.55), round(dy*.55)
+    rect = (max(bounds[0], left-mx), max(bounds[1], top-my),
+            min(bounds[2], right+mx+1), min(bounds[3], bottom+my+1))
+    return {"rect": list(validate_rect(rect, bounds)),
+            "geometry": {"left": left-rect[0], "top": top-rect[1],
+                         "right": right-rect[0], "bottom": bottom-rect[1], "red_bottom": True}}
+
+
+def capture_rect(rect):
+    """Capture only the selected visible screen rectangle; never save pixels."""
+    left, top, right, bottom = validate_rect(rect)
+    width, height = right-left, bottom-top
     user32.GetDC.argtypes = [wintypes.HWND]
     user32.GetDC.restype = wintypes.HDC
     user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]

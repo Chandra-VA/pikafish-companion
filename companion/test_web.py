@@ -23,13 +23,20 @@ class AnalysisTests(unittest.TestCase):
     @unittest.skipUnless(EXE.is_file() and NET.is_file(), "需要用户自行安装的 Pikafish 引擎和 NNUE")
     def test_live_engine_returns_multiple_replayable_lines(self):
         infos = {}
+        observed_roots = set()
         def callback(line):
             info = parse_info(line)
+            if info:
+                observed_roots.add(info["moves"][0])
             if info and not info.get("bound"):
                 infos[info["rank"]] = info
         best = analyze(to_fen(REFERENCE, "w"), 1, callback=callback, multipv=3)
         self.assertEqual(set(infos), {1, 2, 3})
-        self.assertEqual(infos[1]["moves"][0], best)
+        # A timed MultiPV search can stop in a partial iteration, with bounds
+        # and a bestmove differing from the last complete rank-1 score.
+        self.assertIn(best, observed_roots)
+        from rules import apply_move
+        apply_move(REFERENCE, best, "w")
         self.assertGreaterEqual(len(infos[1]["moves"]), 4)
         for info in infos.values():
             positions, descriptions = replay(REFERENCE, info["moves"], "w")

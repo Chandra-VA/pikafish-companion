@@ -8,10 +8,12 @@ import json
 import threading
 import time
 import queue
+import subprocess
+import sys
 from PIL import Image
-from capture import list_game_windows, capture_game, board_visible
+from capture import list_game_windows, capture_game, board_visible, capture_rect, region_from_grid
 from engine import analyze, detect_move, parse_info
-from vision import Recognizer, locate_board, to_fen, describe_move
+from vision import Recognizer, Geometry, locate_board, refine_grid, to_fen, describe_move
 from variation import replay, evaluation
 from rules import apply_move, legal_moves
 from grading import grade_move
@@ -24,6 +26,20 @@ class Controller:
         self.lock = threading.RLock()
         template_path = HERE / "templates.npz"
         self.recognizer = Recognizer.load(template_path) if template_path.exists() else Recognizer()
+        self.window_recognizer = self.recognizer
+        screen_path = HERE / "screen-templates.npz"
+        self.screen_recognizer = Recognizer.load(screen_path) if screen_path.exists() else self.recognizer
+        # A live-video skin can appear inside a window or a screen selection.
+        # Retain the original samples while sharing available skin examples.
+        if screen_path.exists() and self.recognizer.masks is not None:
+            import numpy as np
+            shared = Recognizer(np.concatenate((self.recognizer.masks, self.screen_recognizer.masks))[-500:],
+                                np.concatenate((self.recognizer.labels, self.screen_recognizer.labels))[-500:])
+            self.window_recognizer = self.screen_recognizer = self.recognizer = shared
+        self.capture_mode = "window"
+        self.screen_region = self.region_geometry = self.region_image = None
+        self.picking_region = False
+        self.picker_process = None
         self.diagnostics = diagnostics
         self.automatic = True
         self.turn_mode, self.turn = "auto", None
@@ -72,6 +88,7 @@ class Controller:
         self.board = self.stable_board = self.geometry = None
         self.preview = None
         self.pending_board, self.pending_count = None, 0
+        self.region_image = None
         self.history, self.moves, self.uncertain = [], [], []
         self.base_fen = None
         self.turn = self.turn_mode if self.turn_mode != "auto" else None
@@ -80,19 +97,26 @@ class Controller:
         found = list_game_windows()
         with self.lock:
             self.windows = found
-            if self.selected_hwnd not in [hwnd for hwnd, _ in found]:
+            if self.capture_mode == "window" and self.selected_hwnd not in [hwnd for hwnd, _ in found]:
                 if self.selected_hwnd is not None and self.automatic:
                     self.reset_position()
                 self.selected_hwnd = found[0][0] if len(found) == 1 else None
 
     def monitor_loop(self):
         while not self.closed.is_set():
+            epoch = self.capture_epoch
             try:
                 self.refresh_windows()
                 with self.lock:
                     automatic, hwnd, epoch = self.automatic, self.selected_hwnd, self.capture_epoch
+                    mode, region, geo = self.capture_mode, self.screen_region, deepcopy(self.region_geometry)
                 if automatic:
-                    if hwnd is None:
+                    if mode == "region":
+                        if region is None:
+                            raise ValueError("请先点击“框选屏幕棋盘”。")
+                        image = capture_rect(region)
+                        self.accept_image(image, geo, epoch=epoch)
+                    elif hwnd is None:
                         with self.lock:
                             self.status = "请选择天天象棋窗口。" if self.windows else "等待天天象棋网页；请切换到显示棋盘的标签页。"
                     else:
@@ -103,20 +127,24 @@ class Controller:
                         self.accept_image(image, geo, hwnd=hwnd, epoch=epoch)
             except Exception as error:
                 with self.lock:
-                    if self.automatic:
+                    if self.automatic and epoch == self.capture_epoch:
                         self.invalidate()
                         self.status = str(error)
                         self.pending_board, self.pending_count = None, 0
             self.closed.wait(0.9)
 
     def accept_image(self, image, geometry=None, stable=False, hwnd=None, epoch=None):
-        geo = geometry or locate_board(image)
-        board, uncertain, _ = self.recognizer.recognize(image, geo)
+        with self.lock:
+            if epoch is not None and (not self.automatic or epoch != self.capture_epoch):
+                return
+            recognizer = self.recognizer
+        geo = refine_grid(image, geometry or locate_board(image))
+        board, uncertain, _ = recognizer.recognize(image, geo)
         kings = {piece: [(r, c) for r in range(10) for c in range(9) if board[r][c] == piece] for piece in ("K", "k")}
         if (len(kings["K"]) == len(kings["k"]) == 1 and kings["K"][0][0] <= 2
                 and kings["k"][0][0] >= 7 and not any(cell in uncertain for cells in kings.values() for cell in cells)):
             geo.red_bottom = not geo.red_bottom
-            board, uncertain, _ = self.recognizer.recognize(image, geo)
+            board, uncertain, _ = recognizer.recognize(image, geo)
         margin = min(geo.dx, geo.dy)*0.55
         crop = image.crop((max(0, int(geo.left-margin)), max(0, int(geo.top-margin)),
                            min(image.width, int(geo.right+margin)), min(image.height, int(geo.bottom+margin))))
@@ -124,8 +152,13 @@ class Controller:
         buffer = io.BytesIO()
         crop.save(buffer, format="JPEG", quality=88)
         with self.lock:
+            if epoch is not None and (not self.automatic or epoch != self.capture_epoch):
+                return
             if hwnd is not None and (hwnd != self.selected_hwnd or not self.automatic or epoch != self.capture_epoch):
                 return
+            if epoch is not None and self.capture_mode == "region":
+                self.region_geometry = deepcopy(geo)
+                self.region_image = image.copy()
             self.geometry, self.preview = geo, buffer.getvalue()
             self.board, self.uncertain = board, uncertain
             if uncertain:
@@ -256,6 +289,9 @@ class Controller:
                     "turn_mode": self.turn_mode, "turn_reason": self.turn_reason, "board": self.board,
                     "uncertain": self.uncertain, "geometry": asdict(self.geometry) if self.geometry else None,
                     "status": self.status, "source": self.source, "seconds": self.seconds, "multipv": self.multipv,
+                    "capture_mode": self.capture_mode, "screen_region": self.screen_region,
+                    "region_geometry": asdict(self.region_geometry) if self.region_geometry else None,
+                    "picking_region": self.picking_region,
                     "windows": [{"id": hwnd, "title": title} for hwnd, title in self.windows],
                     "selected_window": self.selected_hwnd, "variations": sorted(self.variations.values(), key=lambda v: (v["side"] != "w", v["rank"])),
                     "bestmoves": self.bestmoves, "analysis_running": self.analysis_running,
@@ -269,13 +305,22 @@ class Controller:
         with self.lock:
             if name == "automatic":
                 self.capture_epoch += 1
-                if bool(data["enabled"]) and (self.source != "网页" or self.simulation_enabled):
+                source = "屏幕区域" if self.capture_mode == "region" else "网页"
+                if bool(data["enabled"]) and (self.source != source or self.simulation_enabled):
                     self.reset_position()
                 self.automatic = bool(data["enabled"])
                 if not self.automatic and self.board is not None and not self.uncertain and self.board == self.stable_board:
                     self.enable_simulation()
-                self.source = "网页" if self.automatic else self.source
-                self.status = "实时同步已开启，正在恢复网页当前局面。" if self.automatic else "实时同步已关闭，可以在棋盘上模拟走棋。"
+                self.source = source if self.automatic else self.source
+                self.status = "实时同步已开启，正在读取所选来源。" if self.automatic else "实时同步已关闭，可以在棋盘上模拟走棋。"
+            elif name == "pick_region":
+                self.pick_region()
+            elif name == "learn_region":
+                self.learn_region()
+            elif name == "region":
+                if self.screen_region is None or self.region_geometry is None:
+                    raise ValueError("请先框选屏幕棋盘。")
+                self.set_screen_region({"rect": self.screen_region, "geometry": asdict(self.region_geometry)})
             elif name == "simulation":
                 self.enable_simulation()
             elif name == "move":
@@ -287,6 +332,8 @@ class Controller:
                 if hwnd not in [item[0] for item in self.windows]:
                     raise ValueError("窗口已关闭，请重新选择。")
                 self.reset_position()
+                self.capture_mode = "window"
+                self.recognizer = self.window_recognizer
                 self.selected_hwnd, self.automatic, self.source = hwnd, True, "网页"
             elif name == "analyze":
                 self.start_analysis()
@@ -340,6 +387,92 @@ class Controller:
             self.reset_position()
         self.accept_image(image, stable=True)
 
+    def set_screen_region(self, selection):
+        """Called only with the native picker's validated physical grid points."""
+        rect, values = selection["rect"], selection["geometry"]
+        points = [round(rect[0]+values["left"]), round(rect[1]+values["top"]),
+                  round(rect[0]+values["right"]), round(rect[1]+values["bottom"])]
+        selected = region_from_grid(points)
+        geometry = Geometry(**selected["geometry"])
+        geometry.validate((selected["rect"][2]-selected["rect"][0], selected["rect"][3]-selected["rect"][1]))
+        with self.lock:
+            self.reset_position()
+            self.capture_mode, self.source = "region", "屏幕区域"
+            self.screen_region, self.region_geometry = selected["rect"], geometry
+            self.recognizer = self.screen_recognizer
+            self.automatic = True
+            self.status = "已框选屏幕棋盘，等待直播画面稳定。"
+
+    def pick_region(self):
+        if self.picking_region:
+            raise ValueError("正在框选；请按 Enter 确认或 Esc 取消。")
+        self.picking_region = True
+        previous_automatic = self.automatic
+        self.automatic = False
+        self.capture_epoch += 1
+        epoch = self.capture_epoch
+        self.invalidate()
+        self.status = "在桌面拖动框选棋盘交叉点；Enter 确认，Esc 取消。"
+
+        def worker():
+            process = None
+            try:
+                with self.lock:
+                    if self.closed.is_set():
+                        return
+                    process = self.picker_process = subprocess.Popen(
+                        [sys.executable, str(HERE / "region_picker.py")],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                        creationflags=subprocess.CREATE_NO_WINDOW)
+                output, unused = process.communicate(timeout=190)
+                result = json.loads(output)
+                with self.lock:
+                    if epoch != self.capture_epoch or self.closed.is_set():
+                        return
+                    if result.get("error"):
+                        raise ValueError(result["error"])
+                    if result.get("selection"):
+                        self.set_screen_region(result["selection"])
+                    else:
+                        self.automatic = previous_automatic
+                        self.status = "已取消框选，保留原来的识别来源。"
+            except Exception as error:
+                if process and process.poll() is None:
+                    process.kill()
+                    process.communicate()
+                with self.lock:
+                    if epoch == self.capture_epoch and not self.closed.is_set():
+                        self.automatic = previous_automatic
+                        self.status = "框选失败：" + str(error)
+            finally:
+                with self.lock:
+                    self.picking_region = False
+                    self.picker_process = None
+        threading.Thread(target=worker, daemon=True).start()
+
+    def learn_region(self):
+        if self.capture_mode != "region" or self.region_image is None or self.geometry is None:
+            raise ValueError("请先框选屏幕棋盘并读取一次画面。")
+        if self.automatic or self.simulation_stack or self.uncertain or self.board != self.stable_board:
+            raise ValueError("请关闭同步、核对并校正全部棋子，退出模拟后再学习当前皮肤。")
+        to_fen(self.board, self.turn or "w")
+        fresh = Recognizer()
+        fresh.calibrate(self.region_image, self.geometry, self.board)
+        observed, uncertain, unused = fresh.recognize(self.region_image, self.geometry)
+        if observed != self.board or uncertain:
+            raise ValueError("这张画面不能稳定区分棋子；请放大直播棋盘后重试。")
+        # Retain absent piece classes from previous templates, capped at 500.
+        import numpy as np
+        old = self.screen_recognizer
+        if old.masks is not None:
+            fresh.masks = np.concatenate((old.masks[-410:], fresh.masks))
+            fresh.labels = np.concatenate((old.labels[-410:], fresh.labels))
+        fresh.save(HERE / "screen-templates.npz")
+        self.clear_simulation()
+        self.screen_recognizer = self.recognizer = fresh
+        self.window_recognizer = fresh
+        self.status = "已在本机学习屏幕棋盘皮肤；可开启实时同步。"
+
     def write_diagnostics(self):
         if self.diagnostics:
             try:
@@ -355,6 +488,9 @@ class Controller:
         self.closed.set()
         self.cancel.set()
         self.grade_cancel.set()
+        with self.lock:
+            if self.picker_process and self.picker_process.poll() is None:
+                self.picker_process.terminate()
         for thread in (self.monitor, self.search_thread, self.grade_thread):
             if thread and thread is not threading.current_thread():
                 thread.join(timeout=3)

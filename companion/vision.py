@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 START = [list(row) for row in (
     "rnbakabnr", ".........", ".c.....c.", "p.p.p.p.p", ".........",
@@ -55,10 +55,87 @@ def ink_mask(image, geometry, row, col):
     return mask, float(red_ink.sum()) / max(1, int(mask.sum()))
 
 
+def refine_grid(image, geometry):
+    """Fit the interior grid lines near a coarse selection, without a model.
+
+    Sampling halfway between intersections avoids most piece faces. Robust
+    regression rejects a line hidden by a piece or streamer annotation.
+    Insufficient/implausible evidence leaves the original selection intact.
+    """
+    geometry.validate(image.size)
+    lum = np.asarray(image.convert("L").filter(ImageFilter.GaussianBlur(.45)), dtype=float)
+
+    def fit_axis(vertical):
+        start, end, count = ((geometry.left, geometry.right, 8) if vertical
+                             else (geometry.top, geometry.bottom, 9))
+        origin, step, segments = ((geometry.top, geometry.dy, 9) if vertical
+                                   else (geometry.left, geometry.dx, 8))
+        spacing = (end-start)/count
+        sample = np.asarray([origin+(n+f)*step for n in range(segments)
+                             if not (vertical and n == 4) for f in (.45, .5, .55)])
+        sample = np.clip(np.rint(sample).astype(int), 0, (image.height if vertical else image.width)-1)
+        limit = image.width if vertical else image.height
+        positions = []
+        for n in range(1, count):
+            expected = start+n*spacing
+            candidates = np.arange(round(expected-spacing*.15), round(expected+spacing*.15)+1)
+            candidates = candidates[(candidates >= 5) & (candidates < limit-5)]
+            contrasts = []
+            for pos in candidates:
+                center = lum[sample, pos] if vertical else lum[pos, sample]
+                sides = ((lum[sample, pos-4]+lum[sample, pos+4])/2 if vertical
+                         else (lum[pos-4, sample]+lum[pos+4, sample])/2)
+                contrasts.append(float(np.median(sides-center)))
+            if contrasts and max(contrasts) > 4:
+                positions.append((n, float(candidates[int(np.argmax(contrasts))])))
+        if len(positions) < 3:
+            return start, end
+        ns, ps = np.asarray(positions).T
+        slope, intercept = np.polyfit(ns, ps, 1)
+        residual = np.abs(ps-(intercept+ns*slope))
+        keep = residual < max(2, float(np.median(residual))*2)
+        if keep.sum() < 3:
+            return start, end
+        slope, intercept = np.polyfit(ns[keep], ps[keep], 1)
+        if max(abs(intercept-start), abs(intercept+count*slope-end)) > spacing*.18:
+            return start, end
+        if float(np.max(np.abs(ps[keep]-(intercept+ns[keep]*slope)))) > spacing*.045:
+            return start, end
+        return float(intercept), float(intercept+count*slope)
+
+    left, right = fit_axis(True)
+    top, bottom = fit_axis(False)
+    refined = Geometry(left, top, right, bottom, geometry.red_bottom)
+    try:
+        refined.validate(image.size)
+        return refined
+    except ValueError:
+        return geometry
+
+
 class Recognizer:
     def __init__(self, masks=None, labels=None):
         self.masks = masks
         self.labels = labels
+        self._prepared_key, self._prepared = None, None
+
+    def prepared_templates(self):
+        key = (id(self.masks), id(self.labels))
+        if key != self._prepared_key:
+            # Repeated blank squares and identical piece samples otherwise
+            # dominate matching work, especially when skins are combined.
+            seen, unique = set(), []
+            for i, (mask, label) in enumerate(zip(self.masks, self.labels)):
+                signature = (str(label), mask.tobytes())
+                if signature not in seen:
+                    seen.add(signature)
+                    unique.append(i)
+            masks, labels = self.masks[unique], self.labels[unique]
+            near = np.asarray([np.asarray(Image.fromarray((m*255).astype(np.uint8))
+                                          .filter(ImageFilter.MaxFilter(3))) > 0 for m in masks])
+            self._prepared = masks, labels, near, masks.sum(axis=(1, 2))
+            self._prepared_key = key
+        return self._prepared
 
     def calibrate(self, image, geometry, board=None):
         board = START if board is None else board
@@ -92,8 +169,8 @@ class Recognizer:
         geometry.validate(image.size)
         board = [["."] * 9 for _ in range(10)]
         uncertain, scores = [], []
-        template_count = self.masks.sum(axis=(1, 2))
-        empty_limit = max(24, float(template_count[self.labels != "."].min())*0.25)
+        all_masks, all_labels, all_near, all_counts = self.prepared_templates()
+        empty_limit = max(24, float(all_counts[all_labels != "."].min())*0.25)
         for row in range(10):
             for col in range(9):
                 mask, red_fraction = ink_mask(image, geometry, row, col)
@@ -102,18 +179,29 @@ class Recognizer:
                 else:
                     allowed = np.asarray([
                         label == "." or (label.isupper() if red_fraction > 0.35 else label.islower())
-                        for label in self.labels])
-                    best = np.zeros(len(self.masks), dtype=float)
-                    padded = np.pad(mask, 4)
-                    for dy in (-4, -2, 0, 2, 4):
-                        for dx in (-4, -2, 0, 2, 4):
-                            shifted = padded[4+dy:52+dy, 4+dx:52+dx]
-                            intersect = (self.masks & shifted).sum(axis=(1, 2))
+                        for label in all_labels])
+                    templates, labels, near, template_count = (a[allowed] for a in
+                                                               (all_masks, all_labels, all_near, all_counts))
+                    best = np.zeros(len(templates), dtype=float)
+                    padded = np.pad(mask, 6)
+                    dilated = np.asarray(Image.fromarray((mask*255).astype(np.uint8))
+                                         .filter(ImageFilter.MaxFilter(3))) > 0
+                    padded_near = np.pad(dilated, 6)
+                    for dy in (-6, -4, -2, 0, 2, 4, 6):
+                        for dx in (-6, -4, -2, 0, 2, 4, 6):
+                            shifted = padded[6+dy:54+dy, 6+dx:54+dx]
+                            shifted_near = padded_near[6+dy:54+dy, 6+dx:54+dx]
+                            intersect = (templates & shifted).sum(axis=(1, 2))
                             denom = template_count + shifted.sum()
-                            score = np.divide(2*intersect, denom, out=np.ones(len(self.masks)), where=denom != 0)
+                            exact = np.divide(2*intersect, denom, out=np.ones(len(templates)), where=denom != 0)
+                            # Permit one-pixel stroke displacement/thickness
+                            # changes, retaining exact overlap as the majority.
+                            tolerant = .5*((templates & shifted_near).sum(axis=(1, 2))/np.maximum(1, template_count)
+                                           + (near & shifted).sum(axis=(1, 2))/max(1, int(shifted.sum())))
+                            score = .65*exact + .35*tolerant
                             best = np.maximum(best, score)
-                    classes = sorted([(float(best[(self.labels == label) & allowed].max()), label)
-                                      for label in LABELS if np.any((self.labels == label) & allowed)], reverse=True)
+                    classes = sorted([(float(best[labels == label].max()), label)
+                                      for label in LABELS if np.any(labels == label)], reverse=True)
                     best_score, best_label = classes[0]
                     margin = best_score - classes[1][0] if len(classes) > 1 else 1.0
                 board[row][col] = best_label

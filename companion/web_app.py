@@ -95,7 +95,7 @@ def make_server(controller, port=PORT):
 
 
 def open_ui():
-    url = f"http://127.0.0.1:{PORT}/?v=integer-scores-1"
+    url = f"http://127.0.0.1:{PORT}/?v=grid-matching-2"
     edge = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft/Edge/Application/msedge.exe"
     if edge.exists():
         subprocess.Popen([str(edge), "--app=" + url, "--window-size=940,900", "--window-position=975,35"])
@@ -111,6 +111,8 @@ def restore_snapshot(controller, path):
     to_fen(board, turn or "w")
     if data.get("uncertain") or data.get("automatic"):
         raise ValueError("只能恢复已暂停、完整的局面")
+    if data.get("capture_mode") == "region" and data.get("screen_region") and data.get("region_geometry"):
+        controller.set_screen_region({"rect": data["screen_region"], "geometry": data["region_geometry"]})
     controller.board = deepcopy(board)
     controller.stable_board = deepcopy(board)
     controller.history = deepcopy(data.get("history", []))
